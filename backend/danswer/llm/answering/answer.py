@@ -501,6 +501,71 @@ class Answer:
             else self._raw_output_for_non_explicit_tool_calling_llms()
         )
 
+        # # special things we need to keep track of for the SearchTool
+        # # raw results that will be displayed to the user
+        # search_results: list[LlmDoc] | None = None
+        # # processed docs to feed into the LLM
+        # final_context_docs: list[LlmDoc] | None = None
+        # for message in output_generator:
+        #     if isinstance(message, ToolCallKickoff) or isinstance(
+        #         message, ToolCallFinalResult
+        #     ):
+        #         yield message
+        #     elif isinstance(message, ToolResponse):
+        #         if message.id == SEARCH_RESPONSE_SUMMARY_ID:
+        #             # We don't need to run section merging in this flow, this variable is only used
+        #             # below to specify the ordering of the documents for the purpose of matching
+        #             # citations to the right search documents. The deduplication logic is more lightweight
+        #             # there and we don't need to do it twice
+        #             search_results = [
+        #                 llm_doc_from_inference_section(section)
+        #                 for section in cast(
+        #                     SearchResponseSummary, message.response
+        #                 ).top_sections
+        #             ]
+        #         elif message.id == FINAL_CONTEXT_DOCUMENTS_ID:
+        #             final_context_docs = cast(list[LlmDoc], message.response)
+        #             yield message
+        #         elif (
+        #             message.id == SEARCH_DOC_CONTENT_ID
+        #             and not self._return_contexts
+        #         ):
+        #             continue
+
+        #     if not self.skip_gen_ai_answer_generation:
+        #         process_answer_stream_fn = _get_answer_stream_processor(
+        #             context_docs=final_context_docs or [],
+        #             # if doc selection is enabled, then search_results will be None,
+        #             # so we need to use the final_context_docs
+        #             doc_id_to_rank_map=map_document_id_order(
+        #                 search_results or final_context_docs or []
+        #             ),
+        #             answer_style_configs=self.answer_style_config,
+        #         )
+
+        #         stream_stop_info = None
+
+        #         def _stream() -> Iterator[str]:
+        #             nonlocal stream_stop_info
+        #             for item in itertools.chain([message], stream):
+        #                 if isinstance(item, StreamStopInfo):
+        #                     stream_stop_info = item
+        #                     return
+
+        #                 # this should never happen, but we're seeing weird behavior here so handling for now
+        #                 if not isinstance(item, str):
+        #                     logger.error(
+        #                         f"Received non-string item in answer stream: {item}. Skipping."
+        #                     )
+        #                     continue
+
+        #                 yield item
+
+        #         yield from process_answer_stream_fn(_stream())
+
+        #         if stream_stop_info:
+        #             yield stream_stop_info
+
         def _process_stream(
             stream: Iterator[ToolCallKickoff | ToolResponse | str | StreamStopInfo],
         ) -> AnswerStream:
