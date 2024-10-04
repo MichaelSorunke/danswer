@@ -3,7 +3,6 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
 from typing import cast
-from uuid import uuid4
 
 from langchain.schema.messages import BaseMessage
 from langchain_core.messages import AIMessageChunk
@@ -18,6 +17,7 @@ from danswer.chat.models import StreamStopInfo
 from danswer.chat.models import StreamStopReason
 from danswer.configs.chat_configs import QA_PROMPT_OVERRIDE
 from danswer.file_store.utils import InMemoryChatFile
+from danswer.llm.answering.explicit_tool_calling_utils import handle_force_tool_use
 from danswer.llm.answering.models import AnswerStyleConfig
 from danswer.llm.answering.models import PreviousMessage
 from danswer.llm.answering.models import PromptConfig
@@ -44,7 +44,6 @@ from danswer.natural_language_processing.utils import get_tokenizer
 from danswer.tools.custom.custom_tool_prompt_builder import (
     build_user_message_for_custom_tool_for_non_tool_calling_llm,
 )
-from danswer.tools.force import filter_tools_for_force_tool_use
 from danswer.tools.force import ForceUseTool
 from danswer.tools.images.image_generation_tool import IMAGE_GENERATION_RESPONSE_ID
 from danswer.tools.images.image_generation_tool import ImageGenerationResponse
@@ -199,67 +198,62 @@ class Answer:
         str | StreamStopInfo | ToolCallKickoff | ToolResponse | ToolCallFinalResult
     ]:
         prompt_builder = AnswerPromptBuilder(self.message_history, self.llm.config)
-
-        tool_call_chunk: AIMessageChunk | None = None
-        if self.force_use_tool.force_use and self.force_use_tool.args is not None:
-            # if we are forcing a tool WITH args specified, we don't need to check which tools to run
-            # / need to generate the args
-            tool_call_chunk = AIMessageChunk(
-                content="",
+        prompt_builder.update_system_prompt(
+            default_build_system_message(self.prompt_config)
+        )
+        prompt_builder.update_user_prompt(
+            default_build_user_message(
+                self.question, self.prompt_config, self.latest_query_files
             )
-            tool_call_chunk.tool_calls = [
-                {
-                    "name": self.force_use_tool.tool_name,
-                    "args": self.force_use_tool.args,
-                    "id": str(uuid4()),
-                }
-            ]
+        )
+
+        tool_runner: ToolRunner | None = None
+        if self.force_use_tool.force_use:
+            tool_runner = handle_force_tool_use(
+                force_use_tool=self.force_use_tool,
+                tools=self.tools,
+                llm=self.llm,
+                default_prompt=prompt_builder.build(),
+            )
         else:
+            tool_call_chunk: AIMessageChunk | None = None
             # if tool calling is supported, first try the raw message
             # to see if we don't need to use any tools
-            prompt_builder.update_system_prompt(
-                default_build_system_message(self.prompt_config)
-            )
-            prompt_builder.update_user_prompt(
-                default_build_user_message(
-                    self.question, self.prompt_config, self.latest_query_files
-                )
-            )
-            prompt = prompt_builder.build()
-            final_tool_definitions = [
-                tool.tool_definition()
-                for tool in filter_tools_for_force_tool_use(
-                    self.tools, self.force_use_tool
-                )
-            ]
+            final_tool_definitions = [tool.tool_definition() for tool in self.tools]
 
+            output: list[BaseMessage | StreamStopInfo] = []
             for message in self.llm.stream(
-                prompt=prompt,
+                prompt=prompt_builder.build(),
                 tools=final_tool_definitions if final_tool_definitions else None,
-                tool_choice="required" if self.force_use_tool.force_use else None,
             ):
-                if isinstance(message, AIMessageChunk) and (
-                    message.tool_call_chunks or message.tool_calls
-                ):
-                    if tool_call_chunk is None:
-                        tool_call_chunk = message
-                    else:
-                        tool_call_chunk += message  # type: ignore
-                else:
-                    if message.content:
-                        if self.is_cancelled:
-                            return
-                        yield cast(str, message.content)
-                    if (
-                        message.additional_kwargs.get("usage_metadata", {}).get("stop")
-                        == "length"
-                    ):
-                        yield StreamStopInfo(
-                            stop_reason=StreamStopReason.CONTEXT_LENGTH
-                        )
+                if self.is_cancelled:
+                    return
 
-            if not tool_call_chunk:
-                return  # no tool call needed
+                output.append(message)
+                yield message
+
+                if (
+                    message.additional_kwargs.get("usage_metadata", {}).get("stop")
+                    == "length"
+                ):
+                    stop_info = StreamStopInfo(
+                        stop_reason=StreamStopReason.CONTEXT_LENGTH
+                    )
+                    output.append(stop_info)
+                    yield stop_info
+
+        tool_call_chunk: AIMessageChunk | None = None
+        for message in output:
+            if isinstance(message, AIMessageChunk) and (
+                message.tool_call_chunks or message.tool_calls
+            ):
+                if tool_call_chunk is None:
+                    tool_call_chunk = message
+                else:
+                    tool_call_chunk += message  # type: ignore
+
+        if not tool_call_chunk:
+            return
 
         # if we have a tool call, we need to call the tool
         tool_call_requests = tool_call_chunk.tool_calls
@@ -280,14 +274,8 @@ class Answer:
                     continue
             else:
                 tool = known_tools_by_name[0]
-            tool_args = (
-                self.force_use_tool.args
-                if self.force_use_tool.tool_name == tool.name
-                and self.force_use_tool.args
-                else tool_call_request["args"]
-            )
 
-            tool_runner = ToolRunner(tool, tool_args)
+            tool_runner = ToolRunner(tool, tool_call_request["args"])
             yield tool_runner.kickoff()
             yield from tool_runner.tool_responses()
 
