@@ -353,4 +353,4 @@ class SearchTool(Tool):
         # NOTE: need to do this json.loads(doc.json()) stuff because there are some
         # subfields that are not serializable by default (datetime)
         # this forces pydantic to make them JSON serializable for us
-        return [json.loads(doc.json()) for doc in final_docs]
+        return [json.loads(doc.model_dump_json()) for doc in final_docs]
