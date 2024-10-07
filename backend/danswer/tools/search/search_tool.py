@@ -423,10 +423,10 @@ class SearchTool(Tool):
 
     @classmethod
     def get_search_result(cls, llm_call: LLMCall) -> list[LlmDoc] | None:
-        if not llm_call.pre_call_yields:
+        if not llm_call.tool_call_info:
             return None
 
-        for yield_item in llm_call.pre_call_yields:
+        for yield_item in llm_call.tool_call_info:
             if (
                 isinstance(yield_item, ToolResponse)
                 and yield_item.id == FINAL_CONTEXT_DOCUMENTS_ID

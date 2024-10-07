@@ -228,8 +228,50 @@ class Answer:
             logger.notice(f"Chosen tool: {chosen_tool_and_args}")
             return chosen_tool_and_args
 
+    def _handle_specified_tool_call(
+        self, llm_calls: list[LLMCall], tool: Tool, tool_args: dict
+    ) -> AnswerStream:
+        current_llm_call = llm_calls[-1]
+
+        # make a dummy tool handler
+        tool_handler = ToolResponseHandler([tool])
+
+        dummy_tool_call_chunk = AIMessageChunk(content="")
+        dummy_tool_call_chunk.tool_calls = [
+            ToolCall(name=tool.name, args=tool_args, id=None)
+        ]
+
+        response_handler_manager = LLMResponseHandlerManager([tool_handler])
+        yield from response_handler_manager.handle_llm_response(
+            iter([dummy_tool_call_chunk])
+        )
+
+        new_llm_call = response_handler_manager.finish(current_llm_call)
+        if new_llm_call:
+            yield from self._get_response(llm_calls + [new_llm_call])
+        else:
+            raise RuntimeError("Tool call handler did not return a new LLM call")
+
     def _get_response(self, llm_calls: list[LLMCall]) -> AnswerStream:
         current_llm_call = llm_calls[-1]
+
+        # handle the case where no decision has to be made; we simply run the tool
+        if (
+            current_llm_call.force_use_tool.force_use
+            and current_llm_call.force_use_tool.args is not None
+        ):
+            tool_name, tool_args = (
+                self.force_use_tool.tool_name,
+                self.force_use_tool.args,
+            )
+            tool = next(
+                (t for t in current_llm_call.tools if t.name == tool_name), None
+            )
+            if not tool:
+                raise RuntimeError(f"Tool '{tool_name}' not found")
+
+            yield from self._handle_specified_tool_call(llm_calls, tool, tool_args)
+            return
 
         # special pre-logic for non-tool calling LLM case
         if not self.using_tool_calling_llm and current_llm_call.tools:
@@ -238,24 +280,7 @@ class Answer:
             )
             if chosen_tool_and_args:
                 tool, tool_args = chosen_tool_and_args
-
-                # make a dummy tool handler
-                tool_handler = ToolResponseHandler([tool])
-                tool_handler.tool_call_chunk = AIMessageChunk(content="")
-                tool_handler.tool_call_requests = [
-                    ToolCall(name=tool.name, args=tool_args, id=None)
-                ]
-
-                response_handler_manager = LLMResponseHandlerManager([tool_handler])
-                new_llm_call = response_handler_manager.finish(current_llm_call)
-                if new_llm_call:
-                    yield from iter(new_llm_call.pre_call_yields)  # type: ignore
-                    yield from self._get_response(llm_calls + [new_llm_call])
-                else:
-                    raise RuntimeError(
-                        "Tool call handler did not return a new LLM call"
-                    )
-
+                yield from self._handle_specified_tool_call(llm_calls, tool, tool_args)
                 return
 
         # set up "handlers" to listen to the LLM response stream and
@@ -274,6 +299,7 @@ class Answer:
 
         response_handler_manager = LLMResponseHandlerManager(handlers)
 
+        # DEBUG: good breakpoint
         stream = self.llm.stream(
             prompt=current_llm_call.prompt_builder.build(),
             tools=[tool.tool_definition() for tool in current_llm_call.tools] or None,
@@ -287,7 +313,6 @@ class Answer:
 
         new_llm_call = response_handler_manager.finish(current_llm_call)
         if new_llm_call:
-            yield from iter(new_llm_call.pre_call_yields)  # type: ignore
             yield from self._get_response(llm_calls + [new_llm_call])
 
     @property
@@ -314,7 +339,7 @@ class Answer:
             tools=self._get_tools_list(),
             force_use_tool=self.force_use_tool,
             files=self.latest_query_files,
-            pre_call_yields=[],
+            tool_call_info=[],
             using_tool_calling_llm=self.using_tool_calling_llm,
         )
 

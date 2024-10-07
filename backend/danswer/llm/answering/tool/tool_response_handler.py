@@ -1,3 +1,5 @@
+from collections.abc import Generator
+
 from langchain_core.messages import AIMessageChunk
 from langchain_core.messages import BaseMessage
 from langchain_core.messages import ToolCall
@@ -8,6 +10,9 @@ from danswer.llm.answering.llm_response_handler import ResponsePart
 from danswer.tools.force import ForceUseTool
 from danswer.tools.message import build_tool_message
 from danswer.tools.message import ToolCallSummary
+from danswer.tools.models import ToolCallFinalResult
+from danswer.tools.models import ToolCallKickoff
+from danswer.tools.models import ToolResponse
 from danswer.tools.tool import Tool
 from danswer.tools.tool_runner import ToolRunner
 from danswer.utils.logger import setup_logger
@@ -19,28 +24,22 @@ logger = setup_logger()
 class ToolResponseHandler(LLMResponseHandler):
     def __init__(self, tools: list[Tool]):
         self.tools = tools
+
         self.tool_call_chunk: AIMessageChunk | None = None
         self.tool_call_requests: list[ToolCall] = []
 
-    def handle_response_part(
-        self, response_item: BaseMessage, previous_response_items: list[BaseMessage]
-    ) -> list[ResponsePart]:
-        if isinstance(response_item, AIMessageChunk) and (
-            response_item.tool_call_chunks or response_item.tool_calls
-        ):
-            if self.tool_call_chunk is None:
-                self.tool_call_chunk = response_item
-            else:
-                self.tool_call_chunk += response_item  # type: ignore
+        self.tool_runner: ToolRunner | None = None
+        self.tool_call_summary: ToolCallSummary | None = None
 
-        if self.tool_call_chunk and self.tool_call_chunk.tool_calls:
-            self.tool_call_requests = self.tool_call_chunk.tool_calls
+        self.tool_kickoff: ToolCallKickoff | None = None
+        self.tool_responses: list[ToolResponse] = []
+        self.tool_final_result: ToolCallFinalResult | None = None
 
-        return []
+    def _handle_tool_call(self) -> Generator[ResponsePart, None, None]:
+        if not self.tool_call_chunk or not self.tool_call_chunk.tool_calls:
+            return
 
-    def finish(self, current_llm_call: LLMCall) -> LLMCall | None:
-        if not self.tool_call_requests or not self.tool_call_chunk:
-            return None
+        self.tool_call_requests = self.tool_call_chunk.tool_calls
 
         selected_tool: Tool | None = None
         selected_tool_call_request: ToolCall | None = None
@@ -64,23 +63,58 @@ class ToolResponseHandler(LLMResponseHandler):
                 break
 
         if not selected_tool or not selected_tool_call_request:
-            return None
+            return
 
-        tool_runner = ToolRunner(selected_tool, selected_tool_call_request["args"])
-        tool_call_summary = ToolCallSummary(
+        self.tool_runner = ToolRunner(selected_tool, selected_tool_call_request["args"])
+        self.tool_call_summary = ToolCallSummary(
             tool_call_request=self.tool_call_chunk,
             tool_call_result=build_tool_message(
-                tool_call_request, tool_runner.tool_message_content()
+                tool_call_request, self.tool_runner.tool_message_content()
             ),
         )
-        tool_kickoff = tool_runner.kickoff()
-        tool_responses = [*tool_runner.tool_responses()]
-        tool_final_result = tool_runner.tool_final_result()
 
-        new_prompt_builder = selected_tool.build_next_prompt(
+        self.tool_kickoff = self.tool_runner.kickoff()
+        yield self.tool_kickoff
+
+        for response in self.tool_runner.tool_responses():
+            self.tool_responses.append(response)
+            yield response
+
+        self.tool_final_result = self.tool_runner.tool_final_result()
+        yield self.tool_final_result
+
+    def handle_response_part(
+        self,
+        response_item: BaseMessage | None,
+        previous_response_items: list[BaseMessage],
+    ) -> Generator[ResponsePart, None, None]:
+        if response_item is None:
+            yield from self._handle_tool_call()
+
+        if isinstance(response_item, AIMessageChunk) and (
+            response_item.tool_call_chunks or response_item.tool_calls
+        ):
+            if self.tool_call_chunk is None:
+                self.tool_call_chunk = response_item
+            else:
+                self.tool_call_chunk += response_item  # type: ignore
+
+        return
+
+    def finish(self, current_llm_call: LLMCall) -> LLMCall | None:
+        if (
+            self.tool_runner is None
+            or self.tool_call_summary is None
+            or self.tool_kickoff is None
+            or self.tool_final_result is None
+        ):
+            return None
+
+        tool_runner = self.tool_runner
+        new_prompt_builder = tool_runner.tool.build_next_prompt(
             prompt_builder=current_llm_call.prompt_builder,
-            tool_call_summary=tool_call_summary,
-            tool_responses=tool_responses,
+            tool_call_summary=self.tool_call_summary,
+            tool_responses=self.tool_responses,
             using_tool_calling_llm=current_llm_call.using_tool_calling_llm,
         )
         return LLMCall(
@@ -93,9 +127,9 @@ class ToolResponseHandler(LLMResponseHandler):
             ),
             files=current_llm_call.files,
             using_tool_calling_llm=current_llm_call.using_tool_calling_llm,
-            pre_call_yields=[
-                tool_kickoff,
-                *tool_responses,
-                tool_final_result,
+            tool_call_info=[
+                self.tool_kickoff,
+                *self.tool_responses,
+                self.tool_final_result,
             ],
         )

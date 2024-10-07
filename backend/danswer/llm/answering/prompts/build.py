@@ -18,7 +18,6 @@ from danswer.natural_language_processing.utils import get_tokenizer
 from danswer.prompts.chat_prompts import CHAT_USER_CONTEXT_FREE_PROMPT
 from danswer.prompts.prompt_utils import add_date_time_to_prompt
 from danswer.prompts.prompt_utils import drop_messages_history_overflow
-from danswer.tools.message import ToolCallSummary
 
 
 def default_build_system_message(
@@ -114,9 +113,7 @@ class AnswerPromptBuilder:
         query, _ = message_to_prompt_and_imgs(self.user_message_and_token_cnt[0])
         return query
 
-    def build(
-        self, tool_call_summary: ToolCallSummary | None = None
-    ) -> list[BaseMessage]:
+    def build(self) -> list[BaseMessage]:
         if not self.user_message_and_token_cnt:
             raise ValueError("User message must be set before building prompt")
 
@@ -133,25 +130,8 @@ class AnswerPromptBuilder:
 
         final_messages_with_tokens.append(self.user_message_and_token_cnt)
 
-        if tool_call_summary:
-            final_messages_with_tokens.append(
-                (
-                    tool_call_summary.tool_call_request,
-                    check_message_tokens(
-                        tool_call_summary.tool_call_request,
-                        self.llm_tokenizer_encode_func,
-                    ),
-                )
-            )
-            final_messages_with_tokens.append(
-                (
-                    tool_call_summary.tool_call_result,
-                    check_message_tokens(
-                        tool_call_summary.tool_call_result,
-                        self.llm_tokenizer_encode_func,
-                    ),
-                )
-            )
+        if self.new_messages_and_token_cnts:
+            final_messages_with_tokens.extend(self.new_messages_and_token_cnts)
 
         return drop_messages_history_overflow(
             final_messages_with_tokens, self.max_tokens

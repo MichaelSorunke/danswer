@@ -16,7 +16,14 @@ from danswer.tools.models import ToolCallKickoff
 from danswer.tools.models import ToolResponse
 from danswer.tools.tool import Tool
 
-ResponsePart = DanswerAnswerPiece | CitationInfo
+ResponsePart = (
+    DanswerAnswerPiece
+    | CitationInfo
+    | ToolCallKickoff
+    | ToolResponse
+    | ToolCallFinalResult
+    | StreamStopInfo
+)
 
 
 class LLMCall(BaseModel__v1):
@@ -24,9 +31,7 @@ class LLMCall(BaseModel__v1):
     tools: list[Tool]
     force_use_tool: ForceUseTool
     files: list[InMemoryChatFile]
-    pre_call_yields: list[
-        str | StreamStopInfo | ToolCallKickoff | ToolResponse | ToolCallFinalResult
-    ]
+    tool_call_info: list[ToolCallKickoff | ToolResponse | ToolCallFinalResult]
     using_tool_calling_llm: bool
 
     class Config:
@@ -37,7 +42,7 @@ class LLMResponseHandler(abc.ABC):
     @abc.abstractmethod
     def handle_response_part(
         self, response_item: BaseMessage, previous_response_items: list[BaseMessage]
-    ) -> list[ResponsePart]:
+    ) -> Generator[ResponsePart, None, None]:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -61,6 +66,9 @@ class LLMResponseHandlerManager:
                     yield response
 
             messages.append(message)
+
+        for handler in self.handlers:
+            yield from handler.handle_response_part(None, messages)
 
     def finish(self, llm_call: LLMCall) -> LLMCall | None:
         new_llm_call = None

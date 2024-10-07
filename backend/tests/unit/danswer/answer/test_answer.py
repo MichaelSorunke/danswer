@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import BaseMessage
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import SystemMessage
 from langchain_core.messages import ToolCall
@@ -154,74 +155,94 @@ def test_basic_answer(answer_instance: Answer) -> None:
             SystemMessage(content="System prompt"),
             HumanMessage(content="Task prompt\n\nQUERY:\nTest question"),
         ],
-        tools=[],
+        tools=None,
         tool_choice=None,
     )
 
 
+@pytest.mark.parametrize(
+    "force_use_tool, expected_tool_args",
+    [
+        (
+            ForceUseTool(force_use=False, tool_name="", args=None),
+            DEFAULT_SEARCH_ARGS,
+        ),
+        (
+            ForceUseTool(
+                force_use=True, tool_name="search", args={"query": "forced search"}
+            ),
+            {"query": "forced search"},
+        ),
+    ],
+)
 def test_answer_with_search_call(
     answer_instance: Answer,
     mock_search_results: list[LlmDoc],
     mock_search_tool: MagicMock,
+    force_use_tool: ForceUseTool,
+    expected_tool_args: dict,
 ) -> None:
     answer_instance.tools = [mock_search_tool]
+    answer_instance.force_use_tool = force_use_tool
 
     # Set up the LLM mock to return search results and then an answer
     mock_llm = cast(Mock, answer_instance.llm)
 
-    tool_call_chunk = AIMessageChunk(
-        content="",
-    )
-    tool_call_chunk.tool_calls = [
-        ToolCall(
-            id="search",
-            name="search",
-            args=DEFAULT_SEARCH_ARGS,
-        )
-    ]
-    tool_call_chunk.tool_call_chunks = [
-        ToolCallChunk(
-            id="search",
-            name="search",
-            args=json.dumps(DEFAULT_SEARCH_ARGS),
-            index=0,
-        )
-    ]
-    mock_llm.stream.side_effect = [
-        [tool_call_chunk],
+    stream_side_effect: list[BaseMessage] = []
+
+    if not force_use_tool.force_use:
+        tool_call_chunk = AIMessageChunk(content="")
+        tool_call_chunk.tool_calls = [
+            ToolCall(
+                id="search",
+                name="search",
+                args=expected_tool_args,
+            )
+        ]
+        tool_call_chunk.tool_call_chunks = [
+            ToolCallChunk(
+                id="search",
+                name="search",
+                args=json.dumps(expected_tool_args),
+                index=0,
+            )
+        ]
+        stream_side_effect.append([tool_call_chunk])
+
+    stream_side_effect.append(
         [
             AIMessageChunk(content="Based on the search results, "),
             AIMessageChunk(content="the answer is abc[1]. "),
             AIMessageChunk(content="This is some other stuff."),
         ],
-    ]
+    )
+    mock_llm.stream.side_effect = stream_side_effect
 
     # Process the output
     output = list(answer_instance.processed_streamed_output)
     print(output)
 
     # Updated assertions
-    assert len(output) == 8
-    assert output[0] == DanswerAnswerPiece(answer_piece="")
-    assert output[1] == ToolCallKickoff(
-        tool_name="search", tool_args=DEFAULT_SEARCH_ARGS
+    assert len(output) == 7
+    assert output[0] == ToolCallKickoff(
+        tool_name="search", tool_args=expected_tool_args
     )
-    assert output[2] == ToolResponse(
+    assert output[1] == ToolResponse(
         id="final_context_documents",
         response=mock_search_results,
     )
-    assert output[3] == ToolCallFinalResult(
+    assert output[2] == ToolCallFinalResult(
         tool_name="search",
-        tool_args=DEFAULT_SEARCH_ARGS,
+        tool_args=expected_tool_args,
         tool_result=[json.loads(doc.model_dump_json()) for doc in mock_search_results],
     )
-    assert output[4] == DanswerAnswerPiece(answer_piece="Based on the search results, ")
+    assert output[3] == DanswerAnswerPiece(answer_piece="Based on the search results, ")
     expected_citation = CitationInfo(citation_num=1, document_id="doc1")
-    assert output[5] == expected_citation
-    assert output[6] == DanswerAnswerPiece(
+    assert output[4] == expected_citation
+    assert output[5] == DanswerAnswerPiece(
         answer_piece="the answer is abc[[1]](https://example.com/doc1). "
     )
-    assert output[7] == DanswerAnswerPiece(answer_piece="This is some other stuff.")
+    assert output[6] == DanswerAnswerPiece(answer_piece="This is some other stuff.")
 
     expected_answer = (
         "Based on the search results, "
@@ -240,25 +261,35 @@ def test_answer_with_search_call(
     assert answer_instance.citations[0] == expected_citation
 
     # Verify LLM calls
-    assert mock_llm.stream.call_count == 2
-    first_call, second_call = mock_llm.stream.call_args_list
+    if not force_use_tool.force_use:
+        assert mock_llm.stream.call_count == 2
+        first_call, second_call = mock_llm.stream.call_args_list
 
-    # First call should include the search tool definition
-    assert len(first_call.kwargs["tools"]) == 1
-    assert (
-        first_call.kwargs["tools"][0] == mock_search_tool.tool_definition.return_value
-    )
+        # First call should include the search tool definition
+        assert len(first_call.kwargs["tools"]) == 1
+        assert (
+            first_call.kwargs["tools"][0]
+            == mock_search_tool.tool_definition.return_value
+        )
 
-    # Second call should not include tools (as we're just generating the final answer)
-    assert "tools" not in second_call.kwargs or not second_call.kwargs["tools"]
-    # Second call should use the returned prompt from build_next_prompt
-    assert (
-        second_call.kwargs["prompt"]
-        == mock_search_tool.build_next_prompt.return_value.build.return_value
-    )
+        # Second call should not include tools (as we're just generating the final answer)
+        assert "tools" not in second_call.kwargs or not second_call.kwargs["tools"]
+        # Second call should use the returned prompt from build_next_prompt
+        assert (
+            second_call.kwargs["prompt"]
+            == mock_search_tool.build_next_prompt.return_value.build.return_value
+        )
 
-    # Verify that tool_definition was called on the mock_search_tool
-    mock_search_tool.tool_definition.assert_called_once()
+        # Verify that tool_definition was called on the mock_search_tool
+        mock_search_tool.tool_definition.assert_called_once()
+    else:
+        assert mock_llm.stream.call_count == 1
+
+        call = mock_llm.stream.call_args_list[0]
+        assert (
+            call.kwargs["prompt"]
+            == mock_search_tool.build_next_prompt.return_value.build.return_value
+        )
 
 
 def test_answer_with_search_no_tool_calling(
