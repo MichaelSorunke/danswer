@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from collections.abc import Iterator
+from uuid import uuid4
 
 from langchain.schema.messages import BaseMessage
 from langchain_core.messages import AIMessageChunk
@@ -238,7 +239,7 @@ class Answer:
 
         dummy_tool_call_chunk = AIMessageChunk(content="")
         dummy_tool_call_chunk.tool_calls = [
-            ToolCall(name=tool.name, args=tool_args, id=None)
+            ToolCall(name=tool.name, args=tool_args, id=str(uuid4()))
         ]
 
         response_handler_manager = LLMResponseHandlerManager([tool_handler])
