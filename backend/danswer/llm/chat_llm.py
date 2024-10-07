@@ -287,6 +287,7 @@ class DefaultMultiLLM(LLM):
             prompt = [_convert_message_to_dict(HumanMessage(content=prompt))]
 
         try:
+            print("TEMPERATURE", self._temperature)
             return litellm.completion(
                 # model choice
                 model=f"{self.config.model_provider}/{self.config.model_name}",

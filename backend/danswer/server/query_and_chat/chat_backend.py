@@ -303,6 +303,9 @@ def handle_new_chat_message(
     _: None = Depends(check_token_rate_limits),
     is_disconnected_func: Callable[[], bool] = Depends(is_disconnected),
 ) -> StreamingResponse:
+    print("H    ")
+    if chat_message_req.llm_override:
+        print(chat_message_req.llm_override.temperature)
     """This endpoint is both used for all the following purposes:
     - Sending a new message in the session
     - Regenerating a message in the session (just send the same one again)
