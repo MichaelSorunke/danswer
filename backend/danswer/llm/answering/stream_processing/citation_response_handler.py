@@ -1,10 +1,10 @@
 from langchain_core.messages import BaseMessage
 
 from danswer.chat.models import CitationInfo
-from danswer.chat.models import DanswerAnswerPiece
 from danswer.chat.models import LlmDoc
 from danswer.llm.answering.llm_response_handler import LLMCall
 from danswer.llm.answering.llm_response_handler import LLMResponseHandler
+from danswer.llm.answering.llm_response_handler import ResponsePart
 from danswer.llm.answering.stream_processing.citation_processing import (
     CitationProcessor,
 )
@@ -26,13 +26,13 @@ class CitationResponseHandler(LLMResponseHandler):
 
     def handle_response_part(
         self, response_item: BaseMessage, previous_response_items: list[BaseMessage]
-    ) -> DanswerAnswerPiece | CitationInfo | None:
+    ) -> list[ResponsePart]:
         content = (
             response_item.content if isinstance(response_item.content, str) else ""
         )
 
         # Process the new content through the citation processor
-        return self.citation_processor.process_token(content)
+        return list(self.citation_processor.process_token(content))
 
     def finish(self, current_llm_call: LLMCall) -> LLMCall | None:
         # Process any remaining content in the citation processor

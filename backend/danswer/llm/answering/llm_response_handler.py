@@ -9,23 +9,25 @@ from danswer.chat.models import CitationInfo
 from danswer.chat.models import DanswerAnswerPiece
 from danswer.chat.models import StreamStopInfo
 from danswer.file_store.models import InMemoryChatFile
+from danswer.llm.answering.prompts.build import AnswerPromptBuilder
 from danswer.tools.force import ForceUseTool
 from danswer.tools.models import ToolCallFinalResult
 from danswer.tools.models import ToolCallKickoff
 from danswer.tools.models import ToolResponse
 from danswer.tools.tool import Tool
 
-ResponsePart = DanswerAnswerPiece | CitationInfo | None
+ResponsePart = DanswerAnswerPiece | CitationInfo
 
 
 class LLMCall(BaseModel__v1):
-    prompt: list[BaseMessage]
+    prompt_builder: AnswerPromptBuilder
     tools: list[Tool]
     force_use_tool: ForceUseTool
     files: list[InMemoryChatFile]
     pre_call_yields: list[
         str | StreamStopInfo | ToolCallKickoff | ToolResponse | ToolCallFinalResult
     ]
+    using_tool_calling_llm: bool
 
     class Config:
         arbitrary_types_allowed = True
@@ -35,7 +37,7 @@ class LLMResponseHandler(abc.ABC):
     @abc.abstractmethod
     def handle_response_part(
         self, response_item: BaseMessage, previous_response_items: list[BaseMessage]
-    ) -> ResponsePart:
+    ) -> list[ResponsePart]:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -54,8 +56,8 @@ class LLMResponseHandlerManager:
         messages: list[BaseMessage] = []
         for message in stream:
             for handler in self.handlers:
-                response = handler.handle_response_part(message, messages)
-                if response:
+                responses = handler.handle_response_part(message, messages)
+                for response in responses:
                     yield response
 
             messages.append(message)

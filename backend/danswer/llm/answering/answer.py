@@ -1,17 +1,14 @@
 from collections.abc import Callable
 from collections.abc import Iterator
-from typing import Any
-from typing import cast
 
 from langchain.schema.messages import BaseMessage
 from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import ToolCall
 
 from danswer.chat.models import AnswerQuestionPossibleReturn
 from danswer.chat.models import CitationInfo
 from danswer.chat.models import DanswerAnswerPiece
 from danswer.chat.models import LlmDoc
-from danswer.chat.models import StreamStopInfo
-from danswer.chat.models import StreamStopReason
 from danswer.configs.chat_configs import QA_PROMPT_OVERRIDE
 from danswer.file_store.utils import InMemoryChatFile
 from danswer.llm.answering.llm_response_handler import LLMCall
@@ -37,13 +34,17 @@ from danswer.llm.answering.stream_processing.utils import DocumentIdOrderMapping
 from danswer.llm.answering.stream_processing.utils import map_document_id_order
 from danswer.llm.answering.tool.tool_response_handler import ToolResponseHandler
 from danswer.llm.interfaces import LLM
-from danswer.llm.interfaces import ToolChoiceOptions
 from danswer.natural_language_processing.utils import get_tokenizer
 from danswer.tools.force import ForceUseTool
-from danswer.tools.search.search_tool import FINAL_CONTEXT_DOCUMENTS_ID
+from danswer.tools.search.search_tool import SearchTool
 from danswer.tools.tool import Tool
 from danswer.tools.tool import ToolResponse
+from danswer.tools.tool_runner import (
+    check_which_tools_should_run_for_non_tool_calling_llm,
+)
 from danswer.tools.tool_runner import ToolCallKickoff
+from danswer.tools.tool_selection import select_single_tool_for_non_tool_calling_llm
+from danswer.tools.utils import explicit_tool_calling_supported
 from danswer.utils.logger import setup_logger
 
 
@@ -112,8 +113,6 @@ class Answer:
         self.tools = tools or []
         self.force_use_tool = force_use_tool
 
-        self.skip_explicit_tool_calling = skip_explicit_tool_calling
-
         self.message_history = message_history or []
         # used for QA flow where we only want to send a single message
         self.single_message_history = single_message_history
@@ -138,27 +137,10 @@ class Answer:
         self.skip_gen_ai_answer_generation = skip_gen_ai_answer_generation
         self._is_cancelled = False
 
-    # This method processes the LLM stream and yields the content or stop information
-    def _process_llm_stream(
-        self,
-        prompt: Any,
-        tools: list[dict] | None = None,
-        tool_choice: ToolChoiceOptions | None = None,
-    ) -> Iterator[str | StreamStopInfo]:
-        for message in self.llm.stream(
-            prompt=prompt, tools=tools, tool_choice=tool_choice
-        ):
-            if isinstance(message, AIMessageChunk):
-                if message.content:
-                    if self.is_cancelled:
-                        return StreamStopInfo(stop_reason=StreamStopReason.CANCELLED)
-                    yield cast(str, message.content)
-
-            if (
-                message.additional_kwargs.get("usage_metadata", {}).get("stop")
-                == "length"
-            ):
-                yield StreamStopInfo(stop_reason=StreamStopReason.CONTEXT_LENGTH)
+        self.skip_explicit_tool_calling = skip_explicit_tool_calling
+        self.using_tool_calling_llm = explicit_tool_calling_supported(
+            self.llm.config.model_provider, self.llm.config.model_name
+        )
 
     def _get_tools_list(self) -> list[Tool]:
         if not self.force_use_tool.force_use:
@@ -180,37 +162,110 @@ class Answer:
         )
         return [tool]
 
-    def _get_search_result(self, llm_call: LLMCall) -> list[LlmDoc] | None:
-        if not llm_call.pre_call_yields:
-            return None
+    @classmethod
+    def _get_tool_call_for_non_tool_calling_llm(
+        cls, llm_call: LLMCall, llm: LLM
+    ) -> tuple[Tool, dict] | None:
+        if llm_call.force_use_tool.force_use:
+            # if we are forcing a tool, we don't need to check which tools to run
+            tool = next(
+                (
+                    t
+                    for t in llm_call.tools
+                    if t.name == llm_call.force_use_tool.tool_name
+                ),
+                None,
+            )
+            if not tool:
+                raise RuntimeError(
+                    f"Tool '{llm_call.force_use_tool.tool_name}' not found"
+                )
 
-        for yield_item in llm_call.pre_call_yields:
-            if (
-                isinstance(yield_item, ToolResponse)
-                and yield_item.id == FINAL_CONTEXT_DOCUMENTS_ID
-            ):
-                return cast(list[LlmDoc], yield_item.response)
+            tool_args = (
+                llm_call.force_use_tool.args
+                if llm_call.force_use_tool.args is not None
+                else tool.get_args_for_non_tool_calling_llm(
+                    query=llm_call.prompt_builder.get_user_message_content(),
+                    history=llm_call.prompt_builder.raw_message_history,
+                    llm=llm,
+                    force_run=True,
+                )
+            )
 
-        return None
+            if tool_args is None:
+                raise RuntimeError(f"Tool '{tool.name}' did not return args")
+
+            return (tool, tool_args)
+        else:
+            tool_options = check_which_tools_should_run_for_non_tool_calling_llm(
+                tools=llm_call.tools,
+                query=llm_call.prompt_builder.get_user_message_content(),
+                history=llm_call.prompt_builder.raw_message_history,
+                llm=llm,
+            )
+
+            available_tools_and_args = [
+                (llm_call.tools[ind], args)
+                for ind, args in enumerate(tool_options)
+                if args is not None
+            ]
+
+            logger.info(
+                f"Selecting single tool from tools: {[(tool.name, args) for tool, args in available_tools_and_args]}"
+            )
+
+            chosen_tool_and_args = (
+                select_single_tool_for_non_tool_calling_llm(
+                    tools_and_args=available_tools_and_args,
+                    history=llm_call.prompt_builder.raw_message_history,
+                    query=llm_call.prompt_builder.get_user_message_content(),
+                    llm=llm,
+                )
+                if available_tools_and_args
+                else None
+            )
+
+            logger.notice(f"Chosen tool: {chosen_tool_and_args}")
+            return chosen_tool_and_args
 
     def _get_response(self, llm_calls: list[LLMCall]) -> AnswerStream:
         current_llm_call = llm_calls[-1]
 
-        stream = self.llm.stream(
-            prompt=current_llm_call.prompt,
-            tools=[tool.tool_definition() for tool in current_llm_call.tools] or None,
-            tool_choice=(
-                "required"
-                if current_llm_call.tools and current_llm_call.force_use_tool.force_use
-                else None
-            ),
-        )
+        # special pre-logic for non-tool calling LLM case
+        if not self.using_tool_calling_llm and current_llm_call.tools:
+            chosen_tool_and_args = self._get_tool_call_for_non_tool_calling_llm(
+                current_llm_call, self.llm
+            )
+            if chosen_tool_and_args:
+                tool, tool_args = chosen_tool_and_args
 
+                # make a dummy tool handler
+                tool_handler = ToolResponseHandler([tool])
+                tool_handler.tool_call_chunk = AIMessageChunk(content="")
+                tool_handler.tool_call_requests = [
+                    ToolCall(name=tool.name, args=tool_args, id=None)
+                ]
+
+                response_handler_manager = LLMResponseHandlerManager([tool_handler])
+                new_llm_call = response_handler_manager.finish(current_llm_call)
+                if new_llm_call:
+                    yield from iter(new_llm_call.pre_call_yields)  # type: ignore
+                    yield from self._get_response(llm_calls + [new_llm_call])
+                else:
+                    raise RuntimeError(
+                        "Tool call handler did not return a new LLM call"
+                    )
+
+                return
+
+        # set up "handlers" to listen to the LLM response stream and
+        # feed back the processed results + handle tool call requests
+        # + figure out what the next LLM call should be
         handlers: list[LLMResponseHandler] = []
         tool_call_handler = ToolResponseHandler(current_llm_call.tools)
         handlers.append(tool_call_handler)
 
-        search_result = self._get_search_result(current_llm_call) or []
+        search_result = SearchTool.get_search_result(current_llm_call) or []
         citation_response_handler = CitationResponseHandler(
             context_docs=search_result,
             doc_id_to_rank_map=map_document_id_order(search_result),
@@ -218,11 +273,21 @@ class Answer:
         handlers.append(citation_response_handler)
 
         response_handler_manager = LLMResponseHandlerManager(handlers)
+
+        stream = self.llm.stream(
+            prompt=current_llm_call.prompt_builder.build(),
+            tools=[tool.tool_definition() for tool in current_llm_call.tools] or None,
+            tool_choice=(
+                "required"
+                if current_llm_call.tools and current_llm_call.force_use_tool.force_use
+                else None
+            ),
+        )
         yield from response_handler_manager.handle_llm_response(stream)
 
         new_llm_call = response_handler_manager.finish(current_llm_call)
         if new_llm_call:
-            yield from iter(new_llm_call.pre_call_yields)
+            yield from iter(new_llm_call.pre_call_yields)  # type: ignore
             yield from self._get_response(llm_calls + [new_llm_call])
 
     @property
@@ -231,21 +296,26 @@ class Answer:
             yield from self._processed_stream
             return
 
-        prompt_builder = AnswerPromptBuilder(self.message_history, self.llm.config)
+        prompt_builder = AnswerPromptBuilder(
+            user_message=default_build_user_message(
+                user_query=self.question,
+                prompt_config=self.prompt_config,
+                files=self.latest_query_files,
+            ),
+            message_history=self.message_history,
+            llm_config=self.llm.config,
+            single_message_history=self.single_message_history,
+        )
         prompt_builder.update_system_prompt(
             default_build_system_message(self.prompt_config)
         )
-        prompt_builder.update_user_prompt(
-            default_build_user_message(
-                self.question, self.prompt_config, self.latest_query_files
-            )
-        )
         llm_call = LLMCall(
-            prompt=prompt_builder.build(),
+            prompt_builder=prompt_builder,
             tools=self._get_tools_list(),
             force_use_tool=self.force_use_tool,
             files=self.latest_query_files,
             pre_call_yields=[],
+            using_tool_calling_llm=self.using_tool_calling_llm,
         )
 
         processed_stream = []

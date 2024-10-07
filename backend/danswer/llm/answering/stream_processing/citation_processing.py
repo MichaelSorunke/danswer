@@ -1,4 +1,5 @@
 import re
+from collections.abc import Generator
 from collections.abc import Iterator
 
 from danswer.chat.models import CitationInfo
@@ -38,7 +39,14 @@ class CitationProcessor:
         self.current_citations: list[int] = []
         self.past_cite_count = 0
 
-    def process_token(self, token: str) -> DanswerAnswerPiece | CitationInfo | None:
+    def process_token(
+        self, token: str | None
+    ) -> Generator[DanswerAnswerPiece | CitationInfo, None, None]:
+        # None -> end of stream
+        if token is None:
+            yield DanswerAnswerPiece(answer_piece=self.curr_segment)
+            return
+
         if self.stop_stream:
             next_hold = self.hold + token
             if self.stop_stream in next_hold:
@@ -109,7 +117,7 @@ class CitationProcessor:
                             try:
                                 doc_id = int(match.group(1))
                                 context_llm_doc = self.context_docs[doc_id - 1]
-                                return CitationInfo(
+                                yield CitationInfo(
                                     citation_num=target_citation_num,
                                     document_id=context_llm_doc.document_id,
                                 )
@@ -138,7 +146,7 @@ class CitationProcessor:
 
                     if target_citation_num not in self.cited_inds:
                         self.cited_inds.add(target_citation_num)
-                        return CitationInfo(
+                        yield CitationInfo(
                             citation_num=target_citation_num,
                             document_id=context_llm_doc.document_id,
                         )
@@ -166,12 +174,12 @@ class CitationProcessor:
                 result += self.curr_segment[:last_citation_end]
                 self.curr_segment = self.curr_segment[last_citation_end:]
 
-        if possible_citation_found:
-            return None
+        if not possible_citation_found:
+            result += self.curr_segment
+            self.curr_segment = ""
 
-        result += self.curr_segment
-        self.curr_segment = ""
-        return DanswerAnswerPiece(answer_piece=result)
+        if result:
+            yield DanswerAnswerPiece(answer_piece=result)
 
 
 def build_citation_processor(

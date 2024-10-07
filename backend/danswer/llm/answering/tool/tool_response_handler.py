@@ -24,7 +24,7 @@ class ToolResponseHandler(LLMResponseHandler):
 
     def handle_response_part(
         self, response_item: BaseMessage, previous_response_items: list[BaseMessage]
-    ) -> ResponsePart:
+    ) -> list[ResponsePart]:
         if isinstance(response_item, AIMessageChunk) and (
             response_item.tool_call_chunks or response_item.tool_calls
         ):
@@ -36,7 +36,7 @@ class ToolResponseHandler(LLMResponseHandler):
         if self.tool_call_chunk and self.tool_call_chunk.tool_calls:
             self.tool_call_requests = self.tool_call_chunk.tool_calls
 
-        return None
+        return []
 
     def finish(self, current_llm_call: LLMCall) -> LLMCall | None:
         if not self.tool_call_requests or not self.tool_call_chunk:
@@ -73,14 +73,18 @@ class ToolResponseHandler(LLMResponseHandler):
                 tool_call_request, tool_runner.tool_message_content()
             ),
         )
+        tool_kickoff = tool_runner.kickoff()
+        tool_responses = [*tool_runner.tool_responses()]
+        tool_final_result = tool_runner.tool_final_result()
 
-        # TODO: use prompt builder
-        new_prompt = current_llm_call.prompt + [
-            tool_call_summary.tool_call_request,
-            tool_call_summary.tool_call_result,
-        ]
+        new_prompt_builder = selected_tool.build_next_prompt(
+            prompt_builder=current_llm_call.prompt_builder,
+            tool_call_summary=tool_call_summary,
+            tool_responses=tool_responses,
+            using_tool_calling_llm=current_llm_call.using_tool_calling_llm,
+        )
         return LLMCall(
-            prompt=new_prompt,
+            prompt_builder=new_prompt_builder,
             tools=[],  # for now, only allow one tool call per response
             force_use_tool=ForceUseTool(
                 force_use=False,
@@ -88,9 +92,10 @@ class ToolResponseHandler(LLMResponseHandler):
                 args=None,
             ),
             files=current_llm_call.files,
+            using_tool_calling_llm=current_llm_call.using_tool_calling_llm,
             pre_call_yields=[
-                tool_runner.kickoff(),
-                *tool_runner.tool_responses(),
-                tool_runner.tool_final_result(),
+                tool_kickoff,
+                *tool_responses,
+                tool_final_result,
             ],
         )

@@ -12,6 +12,7 @@ from danswer.llm.answering.prompts.citations_prompt import compute_max_llm_input
 from danswer.llm.interfaces import LLMConfig
 from danswer.llm.utils import build_content_with_imgs
 from danswer.llm.utils import check_message_tokens
+from danswer.llm.utils import message_to_prompt_and_imgs
 from danswer.llm.utils import translate_history_to_basemessages
 from danswer.natural_language_processing.utils import get_tokenizer
 from danswer.prompts.chat_prompts import CHAT_USER_CONTEXT_FREE_PROMPT
@@ -54,17 +55,13 @@ def default_build_user_message(
 
 class AnswerPromptBuilder:
     def __init__(
-        self, message_history: list[PreviousMessage], llm_config: LLMConfig
+        self,
+        user_message: HumanMessage,
+        message_history: list[PreviousMessage],
+        llm_config: LLMConfig,
+        single_message_history: str | None = None,
     ) -> None:
         self.max_tokens = compute_max_llm_input_tokens(llm_config)
-
-        (
-            self.message_history,
-            self.history_token_cnts,
-        ) = translate_history_to_basemessages(message_history)
-
-        self.system_message_and_token_cnt: tuple[SystemMessage, int] | None = None
-        self.user_message_and_token_cnt: tuple[HumanMessage, int] | None = None
 
         llm_tokenizer = get_tokenizer(
             provider_type=llm_config.model_provider,
@@ -73,6 +70,24 @@ class AnswerPromptBuilder:
         self.llm_tokenizer_encode_func = cast(
             Callable[[str], list[int]], llm_tokenizer.encode
         )
+
+        self.raw_message_history = message_history
+        (
+            self.message_history,
+            self.history_token_cnts,
+        ) = translate_history_to_basemessages(message_history)
+
+        # for cases where like the QA flow where we want to condense the chat history
+        # into a single message rather than a sequence of User / Assistant messages
+        self.single_message_history = single_message_history
+
+        self.system_message_and_token_cnt: tuple[SystemMessage, int] | None = None
+        self.user_message_and_token_cnt = (
+            user_message,
+            check_message_tokens(user_message, self.llm_tokenizer_encode_func),
+        )
+
+        self.new_messages_and_token_cnts: list[tuple[BaseMessage, int]] = []
 
     def update_system_prompt(self, system_message: SystemMessage | None) -> None:
         if not system_message:
@@ -85,14 +100,19 @@ class AnswerPromptBuilder:
         )
 
     def update_user_prompt(self, user_message: HumanMessage) -> None:
-        if not user_message:
-            self.user_message_and_token_cnt = None
-            return
-
         self.user_message_and_token_cnt = (
             user_message,
             check_message_tokens(user_message, self.llm_tokenizer_encode_func),
         )
+
+    def append_message(self, message: BaseMessage) -> None:
+        """Append a new message to the message history."""
+        token_count = check_message_tokens(message, self.llm_tokenizer_encode_func)
+        self.new_messages_and_token_cnts.append((message, token_count))
+
+    def get_user_message_content(self) -> str:
+        query, _ = message_to_prompt_and_imgs(self.user_message_and_token_cnt[0])
+        return query
 
     def build(
         self, tool_call_summary: ToolCallSummary | None = None

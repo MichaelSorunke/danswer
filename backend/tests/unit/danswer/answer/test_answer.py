@@ -12,6 +12,7 @@ from langchain_core.messages import SystemMessage
 from langchain_core.messages import ToolCall
 from langchain_core.messages import ToolCallChunk
 
+from danswer.chat.models import CitationInfo
 from danswer.chat.models import DanswerAnswerPiece
 from danswer.chat.models import LlmDoc
 from danswer.configs.constants import DocumentSource
@@ -19,6 +20,7 @@ from danswer.llm.answering.answer import Answer
 from danswer.llm.answering.models import AnswerStyleConfig
 from danswer.llm.answering.models import CitationConfig
 from danswer.llm.answering.models import PromptConfig
+from danswer.llm.answering.prompts.build import AnswerPromptBuilder
 from danswer.llm.interfaces import LLM
 from danswer.llm.interfaces import LLMConfig
 from danswer.tools.force import ForceUseTool
@@ -27,6 +29,9 @@ from danswer.tools.models import ToolCallKickoff
 from danswer.tools.models import ToolResponse
 from danswer.tools.search.search_tool import FINAL_CONTEXT_DOCUMENTS_ID
 from danswer.tools.search.search_tool import SearchTool
+
+QUERY = "Test question"
+DEFAULT_SEARCH_ARGS = {"query": "search"}
 
 
 @pytest.fixture
@@ -40,13 +45,75 @@ def mock_llm() -> MagicMock:
         api_base=None,
         api_version=None,
     )
-    return mock_llm_obj()
+    return mock_llm_obj
+
+
+@pytest.fixture
+def mock_search_results() -> list[LlmDoc]:
+    return [
+        LlmDoc(
+            content="Search result 1",
+            source_type=DocumentSource.WEB,
+            metadata={"id": "doc1"},
+            document_id="doc1",
+            blurb="Blurb 1",
+            semantic_identifier="Semantic ID 1",
+            updated_at=datetime(2023, 1, 1),
+            link="https://example.com/doc1",
+            source_links={0: "https://example.com/doc1"},
+        ),
+        LlmDoc(
+            content="Search result 2",
+            source_type=DocumentSource.WEB,
+            metadata={"id": "doc2"},
+            document_id="doc2",
+            blurb="Blurb 2",
+            semantic_identifier="Semantic ID 2",
+            updated_at=datetime(2023, 1, 2),
+            link="https://example.com/doc2",
+            source_links={0: "https://example.com/doc2"},
+        ),
+    ]
+
+
+@pytest.fixture
+def mock_search_tool(mock_search_results: list[LlmDoc]) -> MagicMock:
+    mock_tool = MagicMock(spec=SearchTool)
+    mock_tool.name = "search"
+    mock_tool.build_tool_message_content.return_value = "search_response"
+    mock_tool.get_args_for_non_tool_calling_llm.return_value = DEFAULT_SEARCH_ARGS
+    mock_tool.final_result.return_value = [
+        json.loads(doc.model_dump_json()) for doc in mock_search_results
+    ]
+    mock_tool.run.return_value = [
+        ToolResponse(id=FINAL_CONTEXT_DOCUMENTS_ID, response=mock_search_results)
+    ]
+    mock_tool.tool_definition.return_value = {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Search for information",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query"},
+                },
+                "required": ["query"],
+            },
+        },
+    }
+    mock_post_search_tool_prompt_builder = MagicMock(spec=AnswerPromptBuilder)
+    mock_post_search_tool_prompt_builder.build.return_value = [
+        SystemMessage(content="Updated system prompt"),
+    ]
+    mock_tool.build_next_prompt.return_value = mock_post_search_tool_prompt_builder
+    return mock_tool
 
 
 @pytest.fixture
 def answer_instance(mock_llm: LLM) -> Answer:
     return Answer(
-        question="Test question",
+        question=QUERY,
         answer_style_config=AnswerStyleConfig(citation_config=CitationConfig()),
         llm=mock_llm,
         prompt_config=PromptConfig(
@@ -92,66 +159,11 @@ def test_basic_answer(answer_instance: Answer) -> None:
     )
 
 
-def test_answer_with_search_call(answer_instance: Answer) -> None:
-    # Mock search results
-    mock_search_results: list[LlmDoc] = [
-        LlmDoc(
-            content="Search result 1",
-            source_type=DocumentSource.WEB,
-            metadata={"id": "doc1"},
-            document_id="doc1",
-            blurb="Blurb 1",
-            semantic_identifier="Semantic ID 1",
-            updated_at=datetime(2023, 1, 1),
-            link="https://example.com/doc1",
-            source_links={0: "https://example.com/doc1"},
-        ),
-        LlmDoc(
-            content="Search result 2",
-            source_type=DocumentSource.WEB,
-            metadata={"id": "doc2"},
-            document_id="doc2",
-            blurb="Blurb 2",
-            semantic_identifier="Semantic ID 2",
-            updated_at=datetime(2023, 1, 2),
-            link="https://example.com/doc2",
-            source_links={0: "https://example.com/doc2"},
-        ),
-    ]
-    mock_tool_response = ToolResponse(
-        id=FINAL_CONTEXT_DOCUMENTS_ID, response=mock_search_results
-    )
-    mock_final_results = [
-        json.loads(doc.model_dump_json()) for doc in mock_search_results
-    ]
-    mock_tool_final_response = ToolCallFinalResult(
-        tool_name="search",
-        tool_args={"query": "test"},
-        tool_result=mock_final_results,
-    )
-    mock_tool_definition: dict = {
-        "type": "function",
-        "function": {
-            "name": "search",
-            "description": "Search for information",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The search query"},
-                },
-                "required": ["query"],
-            },
-        },
-    }
-
-    # Mock the search tool
-    mock_search_tool = MagicMock(spec=SearchTool)
-    mock_search_tool.name = "search"
-    mock_search_tool.build_tool_message_content.return_value = "search_response"
-    mock_search_tool.get_args_for_non_tool_calling_llm.return_value = {}
-    mock_search_tool.final_result.return_value = mock_final_results
-    mock_search_tool.run.return_value = [mock_tool_response]
-    mock_search_tool.tool_definition.return_value = mock_tool_definition
+def test_answer_with_search_call(
+    answer_instance: Answer,
+    mock_search_results: list[LlmDoc],
+    mock_search_tool: MagicMock,
+) -> None:
     answer_instance.tools = [mock_search_tool]
 
     # Set up the LLM mock to return search results and then an answer
@@ -164,14 +176,14 @@ def test_answer_with_search_call(answer_instance: Answer) -> None:
         ToolCall(
             id="search",
             name="search",
-            args={"query": "test"},
+            args=DEFAULT_SEARCH_ARGS,
         )
     ]
     tool_call_chunk.tool_call_chunks = [
         ToolCallChunk(
             id="search",
             name="search",
-            args='{"query": "test"}',
+            args=json.dumps(DEFAULT_SEARCH_ARGS),
             index=0,
         )
     ]
@@ -179,40 +191,53 @@ def test_answer_with_search_call(answer_instance: Answer) -> None:
         [tool_call_chunk],
         [
             AIMessageChunk(content="Based on the search results, "),
-            AIMessageChunk(content="here's the answer: "),
-            AIMessageChunk(content="This is the final answer."),
+            AIMessageChunk(content="the answer is abc[1]. "),
+            AIMessageChunk(content="This is some other stuff."),
         ],
     ]
 
     # Process the output
     output = list(answer_instance.processed_streamed_output)
-
-    # Assertions
     print(output)
-    assert len(output) == 7
+
+    # Updated assertions
+    assert len(output) == 8
     assert output[0] == DanswerAnswerPiece(answer_piece="")
-    assert output[1] == ToolCallKickoff(tool_name="search", tool_args={"query": "test"})
+    assert output[1] == ToolCallKickoff(
+        tool_name="search", tool_args=DEFAULT_SEARCH_ARGS
+    )
     assert output[2] == ToolResponse(
         id="final_context_documents",
         response=mock_search_results,
     )
-    assert output[3] == mock_tool_final_response
+    assert output[3] == ToolCallFinalResult(
+        tool_name="search",
+        tool_args=DEFAULT_SEARCH_ARGS,
+        tool_result=[json.loads(doc.model_dump_json()) for doc in mock_search_results],
+    )
     assert output[4] == DanswerAnswerPiece(answer_piece="Based on the search results, ")
-    assert output[5] == DanswerAnswerPiece(answer_piece="here's the answer: ")
-    assert output[6] == DanswerAnswerPiece(answer_piece="This is the final answer.")
+    expected_citation = CitationInfo(citation_num=1, document_id="doc1")
+    assert output[5] == expected_citation
+    assert output[6] == DanswerAnswerPiece(
+        answer_piece="the answer is abc[[1]](https://example.com/doc1). "
+    )
+    assert output[7] == DanswerAnswerPiece(answer_piece="This is some other stuff.")
 
+    expected_answer = (
+        "Based on the search results, "
+        "the answer is abc[[1]](https://example.com/doc1). "
+        "This is some other stuff."
+    )
     full_answer = "".join(
         piece.answer_piece
         for piece in output
         if isinstance(piece, DanswerAnswerPiece) and piece.answer_piece is not None
     )
-    assert (
-        full_answer
-        == "Based on the search results, here's the answer: This is the final answer."
-    )
+    assert full_answer == expected_answer
 
-    assert answer_instance.llm_answer == full_answer
-    assert answer_instance.citations == []
+    assert answer_instance.llm_answer == expected_answer
+    assert len(answer_instance.citations) == 1
+    assert answer_instance.citations[0] == expected_citation
 
     # Verify LLM calls
     assert mock_llm.stream.call_count == 2
@@ -220,13 +245,94 @@ def test_answer_with_search_call(answer_instance: Answer) -> None:
 
     # First call should include the search tool definition
     assert len(first_call.kwargs["tools"]) == 1
-    assert first_call.kwargs["tools"][0] == mock_tool_definition
+    assert (
+        first_call.kwargs["tools"][0] == mock_search_tool.tool_definition.return_value
+    )
 
     # Second call should not include tools (as we're just generating the final answer)
     assert "tools" not in second_call.kwargs or not second_call.kwargs["tools"]
+    # Second call should use the returned prompt from build_next_prompt
+    assert (
+        second_call.kwargs["prompt"]
+        == mock_search_tool.build_next_prompt.return_value.build.return_value
+    )
 
     # Verify that tool_definition was called on the mock_search_tool
     mock_search_tool.tool_definition.assert_called_once()
+
+
+def test_answer_with_search_no_tool_calling(
+    answer_instance: Answer,
+    mock_search_results: list[LlmDoc],
+    mock_search_tool: MagicMock,
+) -> None:
+    answer_instance.tools = [mock_search_tool]
+
+    # Set up the LLM mock to return an answer
+    mock_llm = cast(Mock, answer_instance.llm)
+    mock_llm.stream.return_value = [
+        AIMessageChunk(content="Based on the search results, "),
+        AIMessageChunk(content="the answer is abc[1]. "),
+        AIMessageChunk(content="This is some other stuff."),
+    ]
+
+    # Force non-tool calling behavior
+    answer_instance.using_tool_calling_llm = False
+
+    # Process the output
+    output = list(answer_instance.processed_streamed_output)
+
+    # Assertions
+    assert len(output) == 7
+    assert output[0] == ToolCallKickoff(
+        tool_name="search", tool_args=DEFAULT_SEARCH_ARGS
+    )
+    assert output[1] == ToolResponse(
+        id="final_context_documents",
+        response=mock_search_results,
+    )
+    assert output[2] == ToolCallFinalResult(
+        tool_name="search",
+        tool_args=DEFAULT_SEARCH_ARGS,
+        tool_result=[json.loads(doc.model_dump_json()) for doc in mock_search_results],
+    )
+    assert output[3] == DanswerAnswerPiece(answer_piece="Based on the search results, ")
+    expected_citation = CitationInfo(citation_num=1, document_id="doc1")
+    assert output[4] == expected_citation
+    assert output[5] == DanswerAnswerPiece(
+        answer_piece="the answer is abc[[1]](https://example.com/doc1). "
+    )
+    assert output[6] == DanswerAnswerPiece(answer_piece="This is some other stuff.")
+
+    expected_answer = (
+        "Based on the search results, "
+        "the answer is abc[[1]](https://example.com/doc1). "
+        "This is some other stuff."
+    )
+    assert answer_instance.llm_answer == expected_answer
+    assert len(answer_instance.citations) == 1
+    assert answer_instance.citations[0] == expected_citation
+
+    # Verify LLM calls
+    assert mock_llm.stream.call_count == 1
+    call_args = mock_llm.stream.call_args
+
+    # Verify that no tools were passed to the LLM
+    assert "tools" not in call_args.kwargs or not call_args.kwargs["tools"]
+
+    # Verify that the prompt was built correctly
+    assert (
+        call_args.kwargs["prompt"]
+        == mock_search_tool.build_next_prompt.return_value.build.return_value
+    )
+
+    # Verify that get_args_for_non_tool_calling_llm was called on the mock_search_tool
+    mock_search_tool.get_args_for_non_tool_calling_llm.assert_called_once_with(
+        f"Task prompt\n\nQUERY:\n{QUERY}", [], answer_instance.llm
+    )
+
+    # Verify that the search tool's run method was called
+    mock_search_tool.run.assert_called_once()
 
 
 @pytest.mark.parametrize(
