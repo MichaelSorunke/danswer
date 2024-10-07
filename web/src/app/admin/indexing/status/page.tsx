@@ -10,12 +10,6 @@ import { useConnectorCredentialIndexingStatus } from "@/lib/hooks";
 import { usePopupFromQuery } from "@/components/popup/PopupFromQuery";
 
 function Main() {
-  const { popup } = usePopupFromQuery({
-    "connector-created": {
-      message: "Connector created successfully",
-      type: "success",
-    },
-  });
   const {
     data: indexAttemptData,
     isLoading: indexAttemptIsLoading,
@@ -71,7 +65,6 @@ function Main() {
 
   return (
     <>
-      {popup}
       <CCPairIndexingStatusTable
         ccPairsIndexingStatuses={indexAttemptData}
         editableCcPairsIndexingStatuses={editableIndexAttemptData}
@@ -81,8 +74,20 @@ function Main() {
 }
 
 export default function Status() {
+  const { popup } = usePopupFromQuery({
+    "connector-created": {
+      message: "Connector created successfully",
+      type: "success",
+    },
+    "connector-deleted": {
+      message: "Connector deleted successfully",
+      type: "success",
+    },
+  });
+
   return (
     <div className="mx-auto container">
+      {popup}
       <AdminPageTitle
         icon={<NotebookIcon size={32} />}
         title="Existing Connectors"
