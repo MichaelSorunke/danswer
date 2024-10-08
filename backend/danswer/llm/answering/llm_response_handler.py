@@ -1,6 +1,7 @@
-import abc
+from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import BaseMessage
 from pydantic.v1 import BaseModel as BaseModel__v1
@@ -8,6 +9,7 @@ from pydantic.v1 import BaseModel as BaseModel__v1
 from danswer.chat.models import CitationInfo
 from danswer.chat.models import DanswerAnswerPiece
 from danswer.chat.models import StreamStopInfo
+from danswer.chat.models import StreamStopReason
 from danswer.file_store.models import InMemoryChatFile
 from danswer.llm.answering.prompts.build import AnswerPromptBuilder
 from danswer.tools.force import ForceUseTool
@@ -15,6 +17,14 @@ from danswer.tools.models import ToolCallFinalResult
 from danswer.tools.models import ToolCallKickoff
 from danswer.tools.models import ToolResponse
 from danswer.tools.tool import Tool
+
+
+if TYPE_CHECKING:
+    from danswer.llm.answering.stream_processing.citation_response_handler import (
+        AnswerResponseHandler,
+    )
+    from danswer.llm.answering.tool.tool_response_handler import ToolResponseHandler
+
 
 ResponsePart = (
     DanswerAnswerPiece
@@ -38,49 +48,36 @@ class LLMCall(BaseModel__v1):
         arbitrary_types_allowed = True
 
 
-class LLMResponseHandler(abc.ABC):
-    @abc.abstractmethod
-    def handle_response_part(
-        self, response_item: BaseMessage, previous_response_items: list[BaseMessage]
-    ) -> Generator[ResponsePart, None, None]:
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def finish(self, current_llm_call: LLMCall) -> LLMCall | None:
-        raise NotImplementedError
-
-
 class LLMResponseHandlerManager:
-    def __init__(self, handlers: list[LLMResponseHandler]):
-        self.handlers = handlers
+    def __init__(
+        self,
+        tool_handler: "ToolResponseHandler",
+        answer_handler: "AnswerResponseHandler",
+        is_cancelled: Callable[[], bool],
+    ):
+        self.tool_handler = tool_handler
+        self.answer_handler = answer_handler
+        self.is_cancelled = is_cancelled
 
     def handle_llm_response(
         self,
         stream: Iterator[BaseMessage],
     ) -> Generator[ResponsePart, None, None]:
-        messages: list[BaseMessage] = []
+        all_messages: list[BaseMessage] = []
         for message in stream:
-            for handler in self.handlers:
-                responses = handler.handle_response_part(message, messages)
-                for response in responses:
-                    yield response
+            # tool handler doesn't do anything until the full message is received
+            # NOTE: still need to run list() to get this to run
+            list(self.tool_handler.handle_response_part(message, all_messages))
+            yield from self.answer_handler.handle_response_part(message, all_messages)
+            all_messages.append(message)
 
-            messages.append(message)
+            if self.is_cancelled():
+                yield StreamStopInfo(stop_reason=StreamStopReason.CANCELLED)
+                return
 
-        for handler in self.handlers:
-            yield from handler.handle_response_part(None, messages)
+        # potentially give back all info on the selected tool call + its result
+        yield from self.tool_handler.handle_response_part(None, all_messages)
+        yield from self.answer_handler.handle_response_part(None, all_messages)
 
-    def finish(self, llm_call: LLMCall) -> LLMCall | None:
-        new_llm_call = None
-        for handler in self.handlers:
-            new_llm_call_temp = handler.finish(llm_call)
-
-            if new_llm_call and new_llm_call_temp:
-                raise RuntimeError(
-                    "Multiple handlers are trying to add a new LLM call, this is not allowed."
-                )
-
-            if new_llm_call_temp:
-                new_llm_call = new_llm_call_temp
-
-        return new_llm_call
+    def next_llm_call(self, llm_call: LLMCall) -> LLMCall | None:
+        return self.tool_handler.next_llm_call(llm_call)

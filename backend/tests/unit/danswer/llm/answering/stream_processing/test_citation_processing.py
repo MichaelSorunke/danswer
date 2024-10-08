@@ -75,7 +75,7 @@ def process_text(
         doc_id_to_rank_map=mapping,
         stop_stream=None,
     )
-    result = []
+    result: list[DanswerAnswerPiece | CitationInfo] = []
     for token in tokens:
         result.extend(processor.process_token(token))
     result.extend(processor.process_token(None))

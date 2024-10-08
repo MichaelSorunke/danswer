@@ -1,5 +1,4 @@
 import json
-from collections.abc import Callable
 from datetime import datetime
 from typing import cast
 from unittest.mock import MagicMock
@@ -16,6 +15,8 @@ from langchain_core.messages import ToolCallChunk
 from danswer.chat.models import CitationInfo
 from danswer.chat.models import DanswerAnswerPiece
 from danswer.chat.models import LlmDoc
+from danswer.chat.models import StreamStopInfo
+from danswer.chat.models import StreamStopReason
 from danswer.configs.constants import DocumentSource
 from danswer.llm.answering.answer import Answer
 from danswer.llm.answering.models import AnswerStyleConfig
@@ -188,7 +189,7 @@ def test_answer_with_search_call(
     # Set up the LLM mock to return search results and then an answer
     mock_llm = cast(Mock, answer_instance.llm)
 
-    stream_side_effect: list[BaseMessage] = []
+    stream_side_effect: list[list[BaseMessage]] = []
 
     if not force_use_tool.force_use:
         tool_call_chunk = AIMessageChunk(content="")
@@ -366,15 +367,38 @@ def test_answer_with_search_no_tool_calling(
     mock_search_tool.run.assert_called_once()
 
 
-@pytest.mark.parametrize(
-    "is_connected, expected_cancelled",
-    [
-        (lambda: True, False),
-        (lambda: False, True),
-    ],
-)
-def test_is_cancelled(
-    answer_instance: Answer, is_connected: Callable[[], bool], expected_cancelled: bool
-) -> None:
-    answer_instance.is_connected = is_connected
-    assert answer_instance.is_cancelled == expected_cancelled
+def test_is_cancelled(answer_instance: Answer) -> None:
+    # Set up the LLM mock to return multiple chunks
+    mock_llm = Mock()
+    answer_instance.llm = mock_llm
+    mock_llm.stream.return_value = [
+        AIMessageChunk(content="This is the "),
+        AIMessageChunk(content="first part."),
+        AIMessageChunk(content="This should not be seen."),
+    ]
+
+    # Create a mutable object to control is_connected behavior
+    connection_status = {"connected": True}
+    answer_instance.is_connected = lambda: connection_status["connected"]
+
+    # Process the output
+    output = []
+    for i, chunk in enumerate(answer_instance.processed_streamed_output):
+        output.append(chunk)
+        # Simulate disconnection after the second chunk
+        if i == 1:
+            connection_status["connected"] = False
+
+    assert len(output) == 3
+    assert output[0] == DanswerAnswerPiece(answer_piece="This is the ")
+    assert output[1] == DanswerAnswerPiece(answer_piece="first part.")
+    assert output[2] == StreamStopInfo(stop_reason=StreamStopReason.CANCELLED)
+
+    # Verify that the stream was cancelled
+    assert answer_instance.is_cancelled() is True
+
+    # Verify that the final answer only contains the streamed parts
+    assert answer_instance.llm_answer == "This is the first part."
+
+    # Verify LLM calls
+    mock_llm.stream.assert_called_once()

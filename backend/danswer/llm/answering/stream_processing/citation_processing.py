@@ -1,12 +1,10 @@
 import re
 from collections.abc import Generator
-from collections.abc import Iterator
 
 from danswer.chat.models import CitationInfo
 from danswer.chat.models import DanswerAnswerPiece
 from danswer.chat.models import LlmDoc
 from danswer.configs.chat_configs import STOP_STREAM_PAT
-from danswer.llm.answering.models import StreamProcessor
 from danswer.llm.answering.stream_processing.utils import DocumentIdOrderMapping
 from danswer.prompts.constants import TRIPLE_BACKTICK
 from danswer.utils.logger import setup_logger
@@ -180,20 +178,3 @@ class CitationProcessor:
 
         if result:
             yield DanswerAnswerPiece(answer_piece=result)
-
-
-def build_citation_processor(
-    context_docs: list[LlmDoc], doc_id_to_rank_map: DocumentIdOrderMapping
-) -> StreamProcessor:
-    def stream_processor(
-        tokens: Iterator[str],
-    ) -> Iterator[DanswerAnswerPiece | CitationInfo]:
-        processor = CitationProcessor(context_docs, doc_id_to_rank_map)
-        for token in tokens:
-            result = processor.process_token(token)
-            if result:
-                yield result
-        if processor.curr_segment:
-            yield DanswerAnswerPiece(answer_piece=processor.curr_segment)
-
-    return stream_processor

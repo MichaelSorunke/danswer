@@ -1,11 +1,10 @@
+import abc
 from collections.abc import Generator
 
 from langchain_core.messages import BaseMessage
 
 from danswer.chat.models import CitationInfo
 from danswer.chat.models import LlmDoc
-from danswer.llm.answering.llm_response_handler import LLMCall
-from danswer.llm.answering.llm_response_handler import LLMResponseHandler
 from danswer.llm.answering.llm_response_handler import ResponsePart
 from danswer.llm.answering.stream_processing.citation_processing import (
     CitationProcessor,
@@ -13,7 +12,27 @@ from danswer.llm.answering.stream_processing.citation_processing import (
 from danswer.llm.answering.stream_processing.utils import DocumentIdOrderMapping
 
 
-class CitationResponseHandler(LLMResponseHandler):
+class AnswerResponseHandler(abc.ABC):
+    @abc.abstractmethod
+    def handle_response_part(
+        self,
+        response_item: BaseMessage | None,
+        previous_response_items: list[BaseMessage],
+    ) -> Generator[ResponsePart, None, None]:
+        raise NotImplementedError
+
+
+class DummyAnswerResponseHandler(AnswerResponseHandler):
+    def handle_response_part(
+        self,
+        response_item: BaseMessage | None,
+        previous_response_items: list[BaseMessage],
+    ) -> Generator[ResponsePart, None, None]:
+        # This is a dummy handler that returns nothing
+        yield from []
+
+
+class CitationResponseHandler(AnswerResponseHandler):
     def __init__(
         self, context_docs: list[LlmDoc], doc_id_to_rank_map: DocumentIdOrderMapping
     ):
@@ -32,7 +51,7 @@ class CitationResponseHandler(LLMResponseHandler):
         previous_response_items: list[BaseMessage],
     ) -> Generator[ResponsePart, None, None]:
         if response_item is None:
-            return []
+            return
 
         content = (
             response_item.content if isinstance(response_item.content, str) else ""
@@ -40,6 +59,3 @@ class CitationResponseHandler(LLMResponseHandler):
 
         # Process the new content through the citation processor
         yield from self.citation_processor.process_token(content)
-
-    def finish(self, current_llm_call: LLMCall) -> LLMCall | None:
-        return None
